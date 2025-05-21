@@ -21,6 +21,7 @@ app = Flask(__name__)
 
 @app.errorhandler(404)
 def not_found_error(error):
+    print("Error: {}".format(error))
     return jsonify({"error": "Not found"}), 404
 
 @app.errorhandler(500)
@@ -52,7 +53,7 @@ def init_db():
 init_db()
 
 # Main IVR entry point
-@app.route("/incoming_call", methods=['POST'])
+@app.route("/incoming_call", methods=['GET', 'POST'])
 def incoming_call():
     response = VoiceResponse()
     response.say("Thank you for calling customer support. This call may be recorded for quality assurance purposes.")
@@ -125,7 +126,7 @@ def collect_account_info():
     # Extract name and account number
     extract_and_store_account_info(call_sid, speech_result)
     
-    gather = Gather(input='speech', action='/collect_account_issue', method='POST')
+    gather = Gather(input='speech', action='/collect_technical_issue', method='POST')
     gather.say("Thank you. Please describe your account-related issue.")
     response.append(gather)
     
@@ -136,8 +137,9 @@ def extract_and_store_account_info(call_sid, speech_text):
     # Basic pattern for a name followed by numbers
     # This is simplified and might need refinement based on your specific needs
     name_match = re.search(r'^([\w\s]+?)(?=\d)', speech_text)
-    account_match = re.search(r'(\d{4,})', speech_text)  # Looking for 4+ digit sequences
+    account_match = re.search(r'^[1-9][0-9]{9}$', speech_text)  # Looking for 10 digit sequences
     
+    # use llm to get account name from sequence
     name = name_match.group(1).strip() if name_match else "Unknown"
     account = account_match.group(1) if account_match else "Unknown"
     
