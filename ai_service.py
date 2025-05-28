@@ -1,3 +1,4 @@
+import os
 import openai
 from datetime import datetime
 

@@ -12,6 +12,23 @@ def view_database():
         rows = cursor.fetchall()
         print(tabulate(rows, headers=headers, tablefmt="grid"))
     
+    # Recent OTPs
+    print_table("""
+        SELECT phone_number, otp, created_at, verified 
+        FROM otp_verification 
+        ORDER BY created_at DESC 
+        LIMIT 5
+    """, "Recent OTP Verifications")
+    
+    # OTP Statistics
+    print_table("""
+        SELECT 
+            COUNT(*) as total_otps,
+            SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) as verified_otps,
+            SUM(CASE WHEN verified = 0 THEN 1 ELSE 0 END) as pending_otps
+        FROM otp_verification
+    """, "OTP Statistics")
+    
     # Recent Calls
     print_table("""
         SELECT call_sid, caller_number, customer_name, account_number, issue_description
