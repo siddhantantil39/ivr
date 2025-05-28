@@ -3,11 +3,14 @@ import json
 import time
 import sqlite3
 import re
-from datetime import datetime
+import random
+import string
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import speech_recognition as sr
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from dotenv import load_dotenv
+from ai_service import analyze_transcript_with_llm
 load_dotenv()
 
 # Initialize Twilio client
@@ -18,6 +21,31 @@ client = Client(
 )
 
 app = Flask(__name__)
+
+SPEECH_TIMEOUT = 'auto'
+SPEECH_CONFIDENCE_THRESHOLD = 0.6
+
+class CallData:
+    def __init__(self, call_sid, caller_number):
+        self.call_sid = call_sid
+        self.caller_number = caller_number
+        self.customer_name = "Unknown"
+        self.account_number = "Unknown"
+        self.issue_type = "Unknown"
+        self.issue_description = []
+        self.priority = "Low"
+        self.full_transcript = []
+        self.timestamp = datetime.now().isoformat()
+        self.status = "new"
+
+    def add_transcript(self, text):
+        if text:
+            self.full_transcript.append(text)
+
+    def get_full_transcript(self):
+        return " ".join(self.full_transcript)
+
+call_data_store = {}
 
 @app.errorhandler(404)
 def not_found_error(error):
@@ -44,7 +72,20 @@ def init_db():
         issue_type TEXT,
         issue_description TEXT,
         priority TEXT,
-        status TEXT DEFAULT 'new'
+        status TEXT DEFAULT 'new',
+        consent_type TEXT,
+        consent_status TEXT
+    )
+    ''')
+    
+    # Add OTP table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS otp_verification (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone_number TEXT,
+        otp TEXT,
+        created_at TEXT,
+        verified BOOLEAN DEFAULT FALSE
     )
     ''')
     conn.commit()
@@ -56,14 +97,43 @@ init_db()
 @app.route("/incoming_call", methods=['GET', 'POST'])
 def incoming_call():
     response = VoiceResponse()
-    response.say("Thank you for calling customer support. This call may be recorded for quality assurance purposes.")
+    caller = request.form.get('From')
     
-    gather = Gather(num_digits=1, action='/menu_selection', method='POST')
-    gather.say("For account inquiries, press 1. For technical support, press 2. For billing questions, press 3. For all other inquiries, press 4.")
+    # Generate and send OTP
+    otp = generate_otp()
+    store_otp(caller, otp)
+    
+    # Send OTP via SMS
+    client.messages.create(
+        to=caller,
+        from_=os.getenv('TWILIO_PHONE_NUMBER'),
+        body=f"Your IVR authentication code is: {otp}"
+    )
+    
+    # Gather OTP input
+    gather = Gather(num_digits=6, action='/verify_otp', method='POST')
+    gather.say("Please enter the 6-digit code sent to your phone.")
     response.append(gather)
     
-    # If no input received, retry
-    response.redirect('/incoming_call')
+    return str(response)
+
+# Verify OTP and route to menu selection
+@app.route("/verify_otp", methods=['POST'])
+def verify_otp_route():
+    caller = request.form.get('From')
+    entered_otp = request.form.get('Digits')
+    
+    response = VoiceResponse()
+    
+    if verify_otp(caller, entered_otp):
+        # Continue with main menu
+        gather = Gather(num_digits=1, action='/menu_selection', method='POST')
+        gather.say("Authentication successful. For account inquiries, press 1. For technical support, press 2. For billing questions, press 3. For all other inquiries, press 4.")
+        response.append(gather)
+    else:
+        # Failed verification
+        response.say("Invalid or expired code. Please call again.")
+        response.hangup()
     
     return str(response)
 
@@ -74,34 +144,34 @@ def menu_selection():
     call_sid = request.form.get('CallSid')
     caller = request.form.get('From')
     
+    # Initialize call data in memory
+    call_data = CallData(call_sid, caller)
+    call_data.issue_type = get_issue_type(selected_option)
+    call_data_store[call_sid] = call_data
+    
     response = VoiceResponse()
     
-    # Store initial call information
-    conn = sqlite3.connect('call_data.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO calls (call_sid, caller_number, timestamp, issue_type) VALUES (?, ?, ?, ?)",
-        (call_sid, caller, datetime.now().isoformat(), get_issue_type(selected_option))
-    )
-    conn.commit()
-    conn.close()
-    
     if selected_option == '1':
-        gather = Gather(input='speech', action='/collect_account_info', method='POST')
-        gather.say("Please say your full name followed by your account number.")
-        response.append(gather)
+        gather = create_gather(
+            '/collect_account_info',
+            "Please speak your full name first, then pause, then speak your account number."
+        )
     elif selected_option == '2':
-        gather = Gather(input='speech', action='/collect_technical_issue', method='POST')
-        gather.say("Please describe your technical issue in detail.")
-        response.append(gather)
+        gather = create_gather(
+            '/collect_technical_issue',
+            "Please speak slowly and describe your technical problem."
+        )
     elif selected_option == '3':
-        gather = Gather(input='speech', action='/collect_billing_issue', method='POST')
-        gather.say("Please describe your billing question or concern.")
-        response.append(gather)
+        gather = create_gather(
+            '/collect_billing_issue',
+            "Please speak slowly and describe your billing question."
+        )
     else:
-        gather = Gather(input='speech', action='/collect_other_issue', method='POST')
-        gather.say("Please describe how we can assist you today.")
-        response.append(gather)
+        gather = create_gather(
+            '/collect_other_issue',
+            "Please speak slowly and tell us how we can help you."
+        )
+    response.append(gather)
     
     return str(response)
 
@@ -134,14 +204,15 @@ def collect_account_info():
 
 # Extract name and account number using pattern matching
 def extract_and_store_account_info(call_sid, speech_text):
-    # Basic pattern for a name followed by numbers
-    # This is simplified and might need refinement based on your specific needs
-    name_match = re.search(r'^([\w\s]+?)(?=\d)', speech_text)
-    account_match = re.search(r'^[1-9][0-9]{9}$', speech_text)  # Looking for 10 digit sequences
+    # Pattern for Indian names with common prefixes
+    name_pattern = r'^([\w\s.]+?)(?=\d|$)'
+    name_match = re.search(name_pattern, speech_text)
     
-    # use llm to get account name from sequence
+    # Account number pattern (handles various formats)
+    account_match = re.search(r'\b\d{6,16}\b', speech_text)
+    
     name = name_match.group(1).strip() if name_match else "Unknown"
-    account = account_match.group(1) if account_match else "Unknown"
+    account = account_match.group(0) if account_match else "Unknown"
     
     conn = sqlite3.connect('call_data.db')
     cursor = conn.cursor()
@@ -158,8 +229,10 @@ def collect_technical_issue():
     call_sid = request.form.get('CallSid')
     speech_result = request.form.get('SpeechResult', '')
     
-    # Store the issue description
-    store_issue_description(call_sid, speech_result)
+    if call_sid in call_data_store:
+        call_data = call_data_store[call_sid]
+        call_data.issue_description.append(speech_result)
+        call_data.add_transcript(speech_result)
     
     response = VoiceResponse()
     gather = Gather(num_digits=1, action='/collect_priority', method='POST')
@@ -296,22 +369,48 @@ def process_complete_call():
     call_sid = request.form.get('CallSid')
     recording_url = request.form.get('RecordingUrl')
     
-    # In a real system, you would download the recording and process it
-    # Here we'll simulate getting a full transcript
-    full_transcript = simulate_transcription(recording_url)
-    
-    # Store the full transcript
-    conn = sqlite3.connect('call_data.db')
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE calls SET full_transcript = ? WHERE call_sid = ?",
-        (full_transcript, call_sid)
-    )
-    conn.commit()
-    conn.close()
-    
-    # Process the transcript to extract any missing information
-    extract_missing_information(call_sid, full_transcript)
+    if call_sid in call_data_store:
+        call_data = call_data_store[call_sid]
+        transcript = call_data.get_full_transcript()
+        
+        # Get LLM analysis
+        analysis = analyze_transcript_with_llm(transcript)
+        
+        # Update call data with LLM analysis
+        call_data.customer_name = analysis.get('customer_name', call_data.customer_name)
+        call_data.account_number = analysis.get('loan_number', call_data.account_number)
+        
+        # Save to database with additional fields
+        conn = sqlite3.connect('call_data.db')
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO calls (
+                    call_sid, caller_number, timestamp, full_transcript,
+                    customer_name, account_number, issue_type,
+                    issue_description, priority, status,
+                    consent_type, consent_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                call_data.call_sid,
+                call_data.caller_number,
+                call_data.timestamp,
+                transcript,
+                call_data.customer_name,
+                call_data.account_number,
+                call_data.issue_type,
+                "\n".join(call_data.issue_description),
+                call_data.priority,
+                call_data.status,
+                analysis.get('consent_type', 'Unknown'),
+                analysis.get('consent_status', 'Unknown')
+            ))
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        finally:
+            conn.close()
+            del call_data_store[call_sid]
     
     response = VoiceResponse()
     response.say("Thank you for calling. Your information has been recorded. Goodbye.")
@@ -403,6 +502,65 @@ def update_call_status(call_id):
     conn.close()
     
     return jsonify({"success": True})
+
+def generate_otp():
+    return ''.join(random.choices(string.digits, k=6))
+
+def store_otp(phone_number, otp):
+    conn = sqlite3.connect('call_data.db')
+    cursor = conn.cursor()
+    created_at = datetime.now().isoformat()
+    cursor.execute(
+        "INSERT INTO otp_verification (phone_number, otp, created_at) VALUES (?, ?, ?)",
+        (phone_number, otp, created_at)
+    )
+    conn.commit()
+    conn.close()
+
+def verify_otp(phone_number, otp):
+    conn = sqlite3.connect('call_data.db')
+    cursor = conn.cursor()
+    # Check OTP within last 5 minutes
+    five_mins_ago = (datetime.now() - timedelta(minutes=5)).isoformat()
+    cursor.execute(
+        """SELECT * FROM otp_verification 
+           WHERE phone_number = ? AND otp = ? AND created_at > ? 
+           AND verified = FALSE""",
+        (phone_number, otp, five_mins_ago)
+    )
+    result = cursor.fetchone()
+    if result:
+        cursor.execute(
+            "UPDATE otp_verification SET verified = TRUE WHERE id = ?",
+            (result[0],)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
+
+def create_gather(action, prompt, input_type='speech'):
+    gather = Gather(
+        input=input_type,
+        action=action,
+        method='POST',
+        language='en-IN',  # Indian English
+        speech_timeout='auto',
+        speech_model='phone_call',
+        hints=[
+            'account', 'number', 'technical', 'billing',
+            'urgent', 'medium', 'low', 'yes', 'no'
+        ]
+    )
+    
+    gather.say(
+        prompt,
+        voice='Polly.Raveena',  # Indian English voice
+        language='en-IN'
+    )
+    return gather
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
