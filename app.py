@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from ai_service import analyze_transcript_with_llm
 from twilio.base.exceptions import TwilioRestException  
 from flask import url_for
+from dialer_file_processor import process_consent_data
 
 # Initialize Twilio client
 from twilio.rest import Client
@@ -26,29 +27,7 @@ app = Flask(__name__)
 
 SPEECH_CONFIDENCE_THRESHOLD = 0.6
 
-class CallData:
-    def __init__(self, call_sid, caller_number):
-        self.call_sid = call_sid
-        self.caller_number = caller_number
-        self.customer_name = "Unknown"
-        self.account_number = "Unknown"
-        self.issue_type = "Unknown"
-        self.issue_description = []
-        self.priority = "Low"
-        self.full_transcript = []
-        self.conversation_flow = []  # New: track the conversation flow
-        self.timestamp = datetime.now().isoformat()
-        self.status = "new"
-
-    def add_transcript(self, text, stage="unknown"):
-        if text:
-            self.full_transcript.append(text)
-            self.conversation_flow.append({"stage": stage, "text": text})
-
-    def get_full_transcript(self):
-        return " ".join(self.full_transcript)
-
-call_data_store = {}
+call_transcripts = {}  # Format: {call_sid: transcript_text}
 
 @app.errorhandler(404)
 def not_found_error(error):
@@ -99,16 +78,32 @@ init_db()
 # Main IVR entry point
 @app.route("/incoming_call", methods=['GET', 'POST'])
 def incoming_call():
+    caller = request.form.get('From')
+    call_sid = request.form.get('CallSid')
+    
+    # Initialize empty transcript for this call
+    call_transcripts[call_sid] = ""
+
+    if caller and caller.startswith("client:"):
+        default_number = os.getenv('DEFAULT_CALLER_NUMBER', '+1234567890')
+        print(f"Client caller detected, using default number: {default_number}")
+        caller = default_number
+        # Add to transcript
+        call_transcripts[call_sid] += f"Client caller, using number: {default_number}\n"
+    elif not caller:
+        print("No caller number received")
+        caller = os.getenv('DEFAULT_CALLER_NUMBER', '+1234567890')
+        call_transcripts[call_sid] += f"No caller ID, using default: {caller}\n"
+    
+    call_sid = request.form.get('CallSid')
+    call_transcripts[call_sid]+=call_sid
+
     response = VoiceResponse()
     caller = request.form.get('From')
-    test_number = os.getenv('TEST_PHONE_NUMBER')  # Always use test number
 
     
     # Debug: Print caller number format
     print(f"Received call from: {caller}")
-
-    if not caller or request.method == 'GET':
-        caller = os.getenv('TEST_PHONE_NUMBER')
     
     # Handle case where caller number is not provided
     if not caller:
@@ -131,14 +126,14 @@ def incoming_call():
         caller = f"+{caller}" if not caller.startswith('+') else caller
         
         # Send SMS
-        message = client.messages.create(
-            to=test_number,
-            from_=os.getenv('TWILIO_PHONE_NUMBER'),
-            body=f"Your IVR authentication code is: {otp}"
-        )
+        # message = client.messages.create(
+        #     to="+918130773883",
+        #     from_=os.getenv('TWILIO_PHONE_NUMBER'),
+        #     body=f"Your IVR authentication code is: {otp}"
+        # )
         
-        # Debug: Print message SID if successful
-        print(f"Message sent successfully with SID: {message.sid}")
+        # # Debug: Print message SID if successful
+        # print(f"Message sent successfully with SID: {message.sid}")
         
     except TwilioRestException as e:
         print(f"Twilio Error Code: {e.code}")
@@ -157,17 +152,22 @@ def incoming_call():
         response.say(f"We encountered a technical issue: {error_msg}. Please try again later.")
         response.hangup()
         return str(response)
+    
+    gather = Gather(num_digits=1, action='/menu_selection', method='POST')
+    gather.say("Authentication successful. For account inquiries, press 1. For technical support, press 2. For billing questions, press 3. For all other inquiries, press 4.")
+    response.append(gather)
         
     # Continue with normal flow if SMS sent successfully
-    gather = Gather(
-        num_digits=6, 
-        action='/verify_otp', 
-        method='POST',
-        timeout=200,  # Extend timeout to 30 seconds
-        finish_on_key='#'  # Allow user to submit early with #
-    )
-    gather.say("Please enter the 6-digit code sent to your phone, then press pound.")
-    response.append(gather)
+    # gather = Gather(
+    #     num_digits=6, 
+    #     action='/verify_otp', 
+    #     method='POST',
+    #     timeout=200,  # Extend timeout to 30 seconds
+    #     finish_on_key='#'  # Allow user to submit early with #
+    # )
+    # gather.say("Please enter the 6-digit code sent to your phone, then press pound.")
+    # response.append(gather)
+
         
     return str(response)
 
@@ -228,83 +228,24 @@ def menu_selection():
 # Update collect_account_info route for debug
 @app.route("/collect_account_info", methods=['POST'])
 def collect_account_info():
-    print("\n=== Collect Account Info ===")
+    call_sid = request.form.get('CallSid')
+    speech_result = request.form.get('SpeechResult', '')
     
-    try:
-        print(f"Form Data: {request.form}")
-        
-        call_sid = request.form.get('CallSid')
-        speech_result = request.form.get('SpeechResult', '')
-        
-        print(f"Processing call_sid: {call_sid}")
-        print(f"Speech Result: {speech_result}")
-        
-        if not call_sid:
-            raise ValueError("Missing call_sid in request")
-            
-        if call_sid in call_data_store:
-            call_data = call_data_store[call_sid]
-        else:
-            # Initialize new call data if not present
-            caller = request.form.get('From')
-            call_data = CallData(call_sid, caller)
-            call_data_store[call_sid] = call_data
+    # Append to transcript
+    if call_sid in call_transcripts:
+        call_transcripts[call_sid] += f"User: {speech_result}\n"
+    
+    print(f"Current transcript: {call_transcripts.get(call_sid, '')}")
 
-        call_data.add_transcript(speech_result, "account_info")
-            
-        try:
-                # Extract information but don't save to DB
-                name_match = re.search(r'^([\w\s.]+?)(?=\d|$)', speech_result)
-                account_match = re.search(r'\b\d{6,16}\b', speech_result)
-                
-                # Process extracted information
-                if name_match or account_match:
-                    if name_match:
-                        extracted_name = name_match.group(1).strip()
-                        call_data.customer_name = extracted_name
-                        print(f"Extracted Name: {extracted_name}")
-                    
-                    if account_match:
-                        extracted_account = account_match.group(0)
-                        call_data.account_number = extracted_account
-                        print(f"Extracted Account: {extracted_account}")
-                    
-                    # Continue to next step
-                    response = VoiceResponse()
-                    gather = create_gather(
-                        '/collect_technical_issue',
-                        "Thank you. Please describe your account-related issue.",
-                        input_type='speech'
-                    )
-                    response.append(gather)
-                    return str(response)
-                else:
-                    print("No valid information extracted from speech")
-                    response = VoiceResponse()
-                    gather = create_gather(
-                        '/collect_account_info',
-                        "I didn't catch that. Please speak your full name first, then pause, then speak your account number.",
-                        input_type='speech'
-                    )
-                    response.append(gather)
-                    return str(response)
-                    
-        except re.error as e:
-                print(f"Regex error: {str(e)}")
-                raise
-                
-        else:
-            print(f"Call_sid {call_sid} not found in call_data_store")
-            raise ValueError("Invalid call_sid")
-            
-    except Exception as e:
-        print(f"Error in collect_account_info: {str(e)}")
-        response = VoiceResponse()
-        response.say("We encountered a technical issue. Please try your call again.")
-        response.hangup()
-        return str(response)
-
-
+    
+    response = VoiceResponse()
+    gather = create_gather(
+        '/collect_technical_issue',
+        "Thank you. Please describe your account-related issue.",
+        input_type='speech'
+    )
+    response.append(gather)
+    return str(response)
 
 # Process technical issues
 @app.route("/collect_technical_issue", methods=['POST'])
@@ -312,10 +253,10 @@ def collect_technical_issue():
     call_sid = request.form.get('CallSid')
     speech_result = request.form.get('SpeechResult', '')
     
-    if call_sid in call_data_store:
-        call_data = call_data_store[call_sid]
-        call_data.add_transcript(speech_result, "technical_issue")
-        call_data.issue_description.append(speech_result)
+    if call_sid in call_transcripts:
+        call_transcripts[call_sid] += f"Technical issue: {speech_result}\n"
+    
+    print(f"Current transcript: {call_transcripts.get(call_sid, '')}")
     
     response = VoiceResponse()
     gather = Gather(num_digits=1, action='/collect_priority', method='POST')
@@ -435,12 +376,11 @@ def collect_priority():
         priority = priority_mapping.get(digit, 'Low')
         print(f"Mapped Priority: {priority}")
         
-        if call_sid in call_data_store:
-            call_data = call_data_store[call_sid]
-            call_data.priority = priority
-            print(f"Priority stored for call {call_sid}")
-        else:
-            print(f"Warning: Call {call_sid} not found in data store")
+        if call_sid in call_transcripts:
+            # Fix: Use dictionary access instead of calling it as a function
+            call_transcripts[call_sid] += f"Priority: {priority}\n"
+    
+        print(f"Current transcript: {call_transcripts.get(call_sid, '')}")
         
         response = VoiceResponse()
         response.say("Thank you for providing that information. We will register the issue.")
@@ -460,44 +400,73 @@ def collect_priority():
 @app.route("/process_complete_call", methods=['POST'])
 def process_complete_call():
     call_sid = request.form.get('CallSid')
-    recording_url = request.form.get('RecordingUrl')
+    caller = request.form.get('From')
+
+    if caller and caller.startswith("client:"):
+        default_number = os.getenv('DEFAULT_CALLER_NUMBER', '+1234567890')
+        print(f"Client caller detected, using default number: {default_number}")
+        caller = default_number
     
-    if call_sid in call_data_store:
-        call_data = call_data_store[call_sid]
-        transcript = call_data.get_full_transcript()
-        
-        # Get LLM analysis
-        analysis = analyze_transcript_with_llm(transcript)
-        
-        # Single database write at the end
-        conn = sqlite3.connect('call_data.db')
-        cursor = conn.cursor()
+    if call_sid in call_transcripts:
         try:
+            # Get the full transcript
+            transcript = call_transcripts[call_sid]
+            
+            # Analyze with LLM
+            analysis = analyze_transcript_with_llm(transcript)
+            print("LLM Analysis:", analysis)
+            
+            # Store in database
+            conn = sqlite3.connect('call_data.db')
+            cursor = conn.cursor()
+            
+            # Insert or update the call record
             cursor.execute('''
-                INSERT INTO calls (
-                    call_sid, caller_number, timestamp, full_transcript,
-                    customer_name, account_number, issue_type,
-                    issue_description, priority, status,
-                    consent_type, consent_status
+                INSERT OR REPLACE INTO calls (
+                    call_sid, 
+                    caller_number,
+                    timestamp,
+                    full_transcript,
+                    customer_name,
+                    account_number,
+                    issue_type,
+                    issue_description,
+                    priority,
+                    status,
+                    consent_type,
+                    consent_status
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                call_data.call_sid,
-                call_data.caller_number,
-                call_data.timestamp,
+                call_sid,
+                caller,
+                datetime.now().isoformat(),
                 transcript,
-                analysis.get('customer_name', call_data.customer_name),
-                analysis.get('loan_number', call_data.account_number),
-                call_data.issue_type,
-                "\n".join(call_data.issue_description),
-                call_data.priority,
-                call_data.status,
+                analysis.get('customer_name', 'Unknown'),
+                analysis.get('loan_number', 'Unknown'),
+                'consent',
+                transcript,
+                'Low',
+                'new',
                 analysis.get('consent_type', 'Unknown'),
                 analysis.get('consent_status', 'Unknown')
             ))
+            
             conn.commit()
-        finally:
+            print(f"Saved call data for SID: {call_sid}")
+            
+            # Process consent data and update file
+            try:
+                process_consent_data()
+                print("Consent data processed and file updated")
+            except Exception as e:
+                print(f"Error processing consent data: {str(e)}")
+            
+            # Clean up
             conn.close()
-            del call_data_store[call_sid]
+            del call_transcripts[call_sid]
+            
+        except Exception as e:
+            print(f"Error processing call: {str(e)}")
     
     response = VoiceResponse()
     response.say("Thank you for calling. Your information has been recorded. Goodbye.")
