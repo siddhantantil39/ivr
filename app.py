@@ -225,11 +225,19 @@ def menu_selection():
     print("Sending response from menu_selection")
     return str(response)
 
-# Update collect_account_info route for debug
+# Update collect_account_info route
 @app.route("/collect_account_info", methods=['POST'])
 def collect_account_info():
     call_sid = request.form.get('CallSid')
     speech_result = request.form.get('SpeechResult', '')
+    
+    # Check for risks
+    has_risks, found_risks = check_for_risks(speech_result)
+    if has_risks:
+        print(f"RISK ALERT - Call SID: {call_sid}, Risks: {found_risks}")
+        response = VoiceResponse()
+        handle_risky_speech(response, found_risks)
+        return str(response)
     
     # Append to transcript
     if call_sid in call_transcripts:
@@ -252,6 +260,14 @@ def collect_account_info():
 def collect_technical_issue():
     call_sid = request.form.get('CallSid')
     speech_result = request.form.get('SpeechResult', '')
+    
+    # Check for risks
+    has_risks, found_risks = check_for_risks(speech_result)
+    if has_risks:
+        print(f"RISK ALERT - Call SID: {call_sid}, Risks: {found_risks}")
+        response = VoiceResponse()
+        handle_risky_speech(response, found_risks)
+        return str(response)
     
     if call_sid in call_transcripts:
         call_transcripts[call_sid] += f"Technical issue: {speech_result}\n"
@@ -351,7 +367,7 @@ def collect_name():
     
     response = VoiceResponse()
     gather = Gather(num_digits=1, action='/collect_priority', method='POST')
-    gather.say("Thank you. On a scale of 1 to 3, with 1 being urgent and 3 being non-urgent, how would you rate the priority of your issue?")
+    gather.say("Thank you. On a scale of 1 to 3, with 1 being urgent and 3 being non-urgent, how would you rate the priority of your issue? Please enter the priority")
     response.append(gather)
     
     return str(response)
@@ -639,6 +655,29 @@ def create_gather(action, prompt, input_type='speech'):
     )
     return gather
 
+def check_for_risks(speech_text):
+    """Check speech content for risky or abusive content"""
+    risk_words = {
+        'bomb', 'explosion', 'kill', 'damage', 'destroy', 'threat',
+        'murder', 'death', 'attack', 'weapon', 'gun', 'blast',
+        # Add abusive words here
+    }
+    
+    # Convert to lowercase and check for risk words
+    speech_lower = speech_text.lower()
+    found_risks = [word for word in risk_words if word in speech_lower]
+    
+    return bool(found_risks), found_risks
+
+def handle_risky_speech(response, risks):
+    """Add warning message to response for risky speech"""
+    warning = (
+        "We have detected concerning language in your call. "
+        "This incident will be reported to authorities. "
+        "This call is being terminated."
+    )
+    response.say(warning, voice='Polly.Raveena', language='en-IN')
+    response.hangup()
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

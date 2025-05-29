@@ -43,7 +43,7 @@ def view_database():
             caller_number,
             customer_name,
             account_number,
-            substr(full_transcript, 1, 50) || '...' as transcript_preview,
+            full_transcript || '...' as transcript_preview,
             consent_type,
             consent_status,
             timestamp

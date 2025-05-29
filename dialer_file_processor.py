@@ -49,7 +49,7 @@ def process_consent_data():
         # Write records
         for record in records:
             account_number = record[0]
-            phone_number = record[1].replace('+', '').replace('-', '')
+            phone_number = record[1]
             consent_type = record[3]
             consent_flag = '1' if record[2].lower() == 'opt-in' else '0'
             timestamp = record[4]
