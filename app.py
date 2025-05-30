@@ -126,14 +126,14 @@ def incoming_call():
         caller = f"+{caller}" if not caller.startswith('+') else caller
         
         # Send SMS
-        # message = client.messages.create(
-        #     to="+918130773883",
-        #     from_=os.getenv('TWILIO_PHONE_NUMBER'),
-        #     body=f"Your IVR authentication code is: {otp}"
-        # )
+        message = client.messages.create(
+            to="+918130773883",
+            from_=os.getenv('TWILIO_PHONE_NUMBER'),
+            body=f"Your IVR authentication code is: {otp}"
+        )
         
-        # # Debug: Print message SID if successful
-        # print(f"Message sent successfully with SID: {message.sid}")
+        # Debug: Print message SID if successful
+        print(f"Message sent successfully with SID: {message.sid}")
         
     except TwilioRestException as e:
         print(f"Twilio Error Code: {e.code}")
@@ -153,20 +153,20 @@ def incoming_call():
         response.hangup()
         return str(response)
     
-    gather = Gather(num_digits=1, action='/menu_selection', method='POST')
-    gather.say("Authentication successful. For account inquiries, press 1. For technical support, press 2. For billing questions, press 3. For all other inquiries, press 4.")
-    response.append(gather)
+    # gather = Gather(num_digits=1, action='/menu_selection', method='POST')
+    # gather.say("Authentication successful. For account inquiries, press 1. For technical support, press 2. For billing questions, press 3. For all other inquiries, press 4.")
+    # response.append(gather)
         
     # Continue with normal flow if SMS sent successfully
-    # gather = Gather(
-    #     num_digits=6, 
-    #     action='/verify_otp', 
-    #     method='POST',
-    #     timeout=200,  # Extend timeout to 30 seconds
-    #     finish_on_key='#'  # Allow user to submit early with #
-    # )
-    # gather.say("Please enter the 6-digit code sent to your phone, then press pound.")
-    # response.append(gather)
+    gather = Gather(
+        num_digits=6, 
+        action='/verify_otp', 
+        method='POST',
+        timeout=200,  # Extend timeout to 30 seconds
+        finish_on_key='#'  # Allow user to submit early with #
+    )
+    gather.say("Please enter the 6-digit code sent to your phone, then press pound.")
+    response.append(gather)
 
         
     return str(response)

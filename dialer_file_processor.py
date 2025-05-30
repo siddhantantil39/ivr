@@ -10,18 +10,18 @@ def generate_new_filename():
 
 def process_consent_data():
     """Process consent data and create a new file"""
-    # Connect to SQLite database
     conn = sqlite3.connect('call_data.db')
     cursor = conn.cursor()
     
-    # Fetch all consent records
+    # Updated query to include customer_name from database
     cursor.execute('''
         SELECT DISTINCT 
             account_number, 
             caller_number, 
             consent_status,
             consent_type,
-            timestamp
+            timestamp,
+            customer_name  -- Added customer_name field
         FROM calls
         WHERE account_number != 'Unknown'
         AND caller_number != 'Unknown'
@@ -37,24 +37,21 @@ def process_consent_data():
         conn.close()
         return
     
-    # Create new file with timestamp
     filename = generate_new_filename()
     print(f"Creating new file: {filename}")
     
-    # Write records to new file
     with open(filename, 'w', encoding='utf-8') as f:
-        # Write header
-        f.write("Account_Number|Phone_Number|Consent_Type|Consent_Flag|Timestamp\n")
+        f.write("Account_Number|Phone_Number|Customer_Name|Consent_Type|Consent_Flag|Timestamp\n")
         
-        # Write records
         for record in records:
             account_number = record[0]
             phone_number = record[1]
             consent_type = record[3]
             consent_flag = '1' if record[2].lower() == 'opt-in' else '0'
             timestamp = record[4]
+            customer_name = record[5] if record[5] != 'Unknown' else '' 
             
-            line = f"{account_number}|{phone_number}|{consent_type}|{consent_flag}|{timestamp}\n"
+            line = f"{account_number}|{phone_number}|{customer_name}|{consent_type}|{consent_flag}|{timestamp}\n"
             f.write(line)
     
     print(f"Created new file with {len(records)} records")
